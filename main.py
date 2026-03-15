@@ -32,8 +32,8 @@ class Config:
     ARDUINO_BAUD = 9600
 
     # ── Telegram ──────────────────────────────────────────────
-    TELEGRAM_TOKEN = '7673204531:AAFhHmjJG47YPgNbbAXbQy6FC0K_L_7MmrM'
-    CHAT_ID        = '6907906011'
+    TELEGRAM_TOKEN = 'Your Telegram ID'
+    CHAT_ID        = 'Your Chat ID'
 
     # ── Files  (always written next to this script) ───────────
     VIDEO_FILENAME = os.path.join(BASE_DIR, "fall_alert.mp4")   # H.264 MP4 — browser playable
