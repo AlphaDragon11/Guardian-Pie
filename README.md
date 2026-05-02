@@ -79,25 +79,6 @@ This repository already includes concrete runtime outputs:
 - **Dashboard analytics:** `dashboard.py`  
   Provides operational metrics such as total falls, average confidence, unconscious events, and next-24h risk estimate.
 
-## Colab / Notebook Results Section (Recruiter-Friendly Format)
-
-When you finalize notebook outputs, add them under an `assets/results/` folder and link them here:
-
-- **Model/experiment summary:** accuracy, precision/recall, false-positive trends.
-- **Ablation or threshold analysis:** why selected fall thresholds are practical.
-- **Visual examples:** confusion matrix, risk distribution, sample inference frames.
-
-Suggested subsection template:
-
-```md
-## Colab Experiment Highlights
-- Dataset/Scenario: ...
-- Best model setup: ...
-- Key metric gains: ...
-- Practical takeaway for deployment: ...
-![Confusion Matrix](assets/results/confusion_matrix.png)
-![Risk Trend](assets/results/risk_trend.png)
-```
 
 ## Tech Stack
 
@@ -124,7 +105,7 @@ python main.py
 python -m streamlit run dashboard.py
 ```
 
-## Recruiter Highlights
+## Highlights
 
 - End-to-end ownership: sensing, inference, alerting, logging, and dashboarding.
 - Real-time systems thinking: latency-aware decision flow with fallback behavior.
