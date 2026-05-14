@@ -37,6 +37,10 @@ Build a practical, affordable, and deployable safety intelligence layer for assi
 - Event logging to CSV for black-box style traceability.
 - Auto video capture of fall events for audit and review.
 - Streamlit command dashboard for monitoring, analytics, and trend insights.
+- Rolling 5-frame temporal smoothing on pose landmarks before signal computation.
+- Confidence-weighted fall voting engine (torso angle 35%, aspect ratio 25%, nose proximity 20%, velocity 20%) replacing equal-weight majority vote.
+- CLAHE luminance enhancement for low-light pose accuracy, replacing gamma-only correction.
+- Pre-fall 5-second frame buffer — Telegram clip begins before the fall is detected (5s pre + 10s post = 15s total).
 
 ## System Architecture
 
@@ -62,7 +66,7 @@ clipStore --> dashboardView
    - body aspect ratio (horizontal posture),
    - torso angle from vertical,
    - downward nose velocity.
-4. Fall is confirmed with temporal stability (`FALL_FRAMES_TO_CONFIRM`) and cooldown protection.
+4. Landmarks are smoothed over a 5-frame rolling average before evaluation. Fall is confirmed via a weighted confidence score across four signals (threshold: 0.60), with temporal stability (FALL_FRAMES_TO_CONFIRM) and cooldown protection.
 5. System triggers buzzer/voice/notification path, records video clip, and logs incident metadata.
 6. Dashboard visualizes trends, confidence, severity, and risk windows.
 
@@ -73,8 +77,8 @@ This repository already includes concrete runtime outputs:
 - **Incident log:** `incident_log.csv`  
   Contains timestamped `FALL_EVENT`, `TRIPWIRE`, and `VITAL_CHECK` records, including angle and confidence (for example: `Angle:62 Conf:83%`).
 
-- **Demo capture:** `fall_alert.mp4`  
-  Recorded alert clip artifact for qualitative validation and presentation.
+- **Demo capture:**
+  fall_alert.mp4 — 15-second clip (5s pre-fall + 10s post-fall) recorded at detection. Sent automatically to caregiver via Telegram.
 
 - **Dashboard analytics:** `dashboard.py`  
   Provides operational metrics such as total falls, average confidence, unconscious events, and next-24h risk estimate.
@@ -114,8 +118,6 @@ python -m streamlit run dashboard.py
 
 ## Roadmap
 
-- Improve robustness under occlusion/low light and crowded scenes.
-- Reduce false positives with calibration + user-specific profiles.
 - Add cloud sync and notification escalations (multi-channel).
 - Package deployment workflow for assisted-living pilots.
 
