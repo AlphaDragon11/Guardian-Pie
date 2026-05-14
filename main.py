@@ -9,6 +9,7 @@ import sys
 import os
 import csv
 import math
+from collections import deque
 import pyttsx3
 import serial
 
@@ -40,7 +41,7 @@ class Config:
     LOG_FILENAME   = os.path.join(BASE_DIR, "incident_log.csv")
 
     # ── Recording ─────────────────────────────────────────────
-    RECORD_SECONDS = 20
+    RECORD_SECONDS = 25
     VIDEO_FPS      = 20.0
 
     # ── Feature flags ─────────────────────────────────────────
@@ -68,7 +69,17 @@ class Config:
     NOSE_FLOOR_LIMIT      = 0.62   # normalised y (lower = closer to floor)
     ASPECT_RATIO_THRESH   = 1.15   # width/height ratio indicating horizontal body
     VELOCITY_THRESHOLD    = 0.018  # min downward nose velocity to count as fall
+    # ── Pre-fall video buffer ──────────────────────────────────
+    PRE_FALL_BUFFER_SECONDS = 5       # seconds of footage kept before fall detection
 
+    # ── Temporal smoothing ────────────────────────────────────
+    LANDMARK_SMOOTH_FRAMES = 5        # rolling average window for pose landmarks
+
+    # ── Weighted voting ───────────────────────────────────────
+    # Weights for the 4 signals: [nose_floor, aspect_ratio, torso_angle, nose_velocity]
+    # Must sum to 1.0
+    SIGNAL_WEIGHTS = [0.20, 0.25, 0.35, 0.20]
+    WEIGHTED_FALL_THRESHOLD = 0.60    # weighted score must exceed this to confirm fall
     # ── BGR colours ───────────────────────────────────────────
     GREEN  = (0, 210, 90)
     RED    = (0, 40, 220)
@@ -385,6 +396,8 @@ class SafetyBrain:
         # velocity tracking for nose position
         self._prev_nose_y  = None
         self._nose_vels    = []        # rolling buffer of nose y-velocities
+        # temporal smoothing buffer
+        self._landmark_buffer = deque(maxlen=Config.LANDMARK_SMOOTH_FRAMES)
 
         # motion heatmap
         self.heatmap       = None
@@ -399,16 +412,20 @@ class SafetyBrain:
         brightness = float(np.mean(hsv[:, :, 2]))
         self._night_active = brightness < Config.BRIGHTNESS_LIMIT
         if self._night_active:
-            # gamma correction  (invGamma < 1 → brighter output)
-            gamma    = 0.45
-            inv      = 1.0 / gamma
-            table    = (np.arange(256) / 255.0) ** inv * 255
-            table    = np.clip(table, 0, 255).astype(np.uint8)
-            frame    = cv2.LUT(frame, table)
-            # green tint so it looks like actual night-vision
-            b, g, r  = cv2.split(frame)
-            g        = cv2.add(g, 20)
-            frame    = cv2.merge([b, g, r])
+            # CLAHE on LAB luminance channel — better contrast without blowout
+            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+            l_ch, a_ch, b_ch = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+            l_ch = clahe.apply(l_ch)
+            frame = cv2.cvtColor(cv2.merge([l_ch, a_ch, b_ch]), cv2.COLOR_LAB2BGR)
+            # gamma correction on top for extra brightness
+            table = (np.arange(256) / 255.0) ** (1.0 / 0.55) * 255
+            table = np.clip(table, 0, 255).astype(np.uint8)
+            frame = cv2.LUT(frame, table)
+            # green tint
+            b, g, r = cv2.split(frame)
+            g = cv2.add(g, 20)
+            frame = cv2.merge([b, g, r])
         return frame
 
     # ── Privacy mask ──────────────────────────────────────────
@@ -494,9 +511,9 @@ class SafetyBrain:
         signals.append(sig4)
         self._prev_nose_y = nose.y
 
-        score = sum(signals) / len(signals)
-        # require at least 3/4 signals to fire
-        is_fallen = sum(signals) >= 3
+        # Weighted score — torso angle carries most weight
+        score = sum(w for w, s in zip(Config.SIGNAL_WEIGHTS, signals) if s)
+        is_fallen = score >= Config.WEIGHTED_FALL_THRESHOLD
         return is_fallen, score
 
     # ── Main per-frame AI call ────────────────────────────────
@@ -515,8 +532,27 @@ class SafetyBrain:
         HUD.draw_tripwire(frame, Config.TRIPWIRE_X_LIMIT)
 
         if results.pose_landmarks:
-            lm = results.pose_landmarks.landmark
+            raw_lm = results.pose_landmarks.landmark
 
+            # ── Temporal smoothing: rolling average over last N frames ──
+            self._landmark_buffer.append([(l.x, l.y, l.z) for l in raw_lm])
+
+            if len(self._landmark_buffer) >= 2:
+                class _SmoothLM:
+                    __slots__ = ('x', 'y', 'z')
+                    def __init__(self, x, y, z):
+                        self.x, self.y, self.z = x, y, z
+
+                lm = [
+                    _SmoothLM(
+                        float(np.mean([f[i][0] for f in self._landmark_buffer])),
+                        float(np.mean([f[i][1] for f in self._landmark_buffer])),
+                        float(np.mean([f[i][2] for f in self._landmark_buffer])),
+                    )
+                    for i in range(len(raw_lm))
+                ]
+            else:
+                lm = raw_lm  # not enough frames yet, use raw
             # person bounding box
             HUD.draw_person_box(frame, lm, self.mp_pose)
 
@@ -631,6 +667,9 @@ def main():
     system_awake        = False
     night_mode_on       = False
     current_fall_conf   = 0.0
+    # Rolling pre-fall frame buffer (5 sec × 20 fps = 100 frames)
+    PRE_FALL_FRAMES = int(Config.PRE_FALL_BUFFER_SECONDS * Config.VIDEO_FPS)
+    frame_buffer = deque(maxlen=PRE_FALL_FRAMES)
 
     voice.speak("Guardian Pi online. Awaiting PIR sensor trigger.")
     print("[SYS] Online. Waiting for Arduino motion signal …\n")
@@ -738,10 +777,16 @@ def main():
             record_target = int(Config.RECORD_SECONDS * Config.VIDEO_FPS)
             video_writer  = make_video_writer(Config.VIDEO_FILENAME,
                                               Config.VIDEO_FPS, fw, fh)
-            if not video_writer.isOpened():
-                print("[VIDEO] ❌ Could not create video writer!")
-            else:
-                print(f"[VIDEO] Recording → {Config.VIDEO_FILENAME}")
+           if not video_writer.isOpened():
+            print("[VIDEO] ❌ Could not create video writer!")
+        else:
+            print(f"[VIDEO] Recording → {Config.VIDEO_FILENAME}")
+            # Write pre-fall buffer first so clip starts 5s before detection
+            print(f"[VIDEO] Prepending {len(frame_buffer)} pre-fall frames")
+            for buffered_frame in frame_buffer:
+                video_writer.write(buffered_frame)
+            frames_recorded += len(frame_buffer)
+            frame_buffer.clear()
 
         # ── Active recording ──────────────────────────────────
         if is_recording:
@@ -776,6 +821,8 @@ def main():
                     f"FALL DETECTED | Vitals: {vital_status} | Angle: {int(brain.last_angle)}°")
                 voice.speak("Emergency clip sent. System resetting.")
 
+        # Keep rolling buffer of processed frames for pre-fall rewind
+        frame_buffer.append(processed.copy())
         # ── HUD overlay ───────────────────────────────────────
         HUD.draw_status_bar(
             processed, status_txt, is_recording, vital_status,
